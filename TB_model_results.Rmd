@@ -1,0 +1,304 @@
+---
+title: 'Role of reinfection in sustaining TB transmission'
+output:
+  word_document:
+    toc: true
+  html_document:
+    toc: true
+    df_print: paged
+---
+
+
+```{r setup, include=FALSE, message=F, warning=F}
+knitr::opts_chunk$set(echo = F, warning=F, message=F)
+library(dplyr)
+library(kableExtra)
+library(ggplot2)
+library(ggpubr)
+library(flextable)
+library(readxl)
+
+setwd("/projectnb/cbs/samalate/TBinfection")
+options(dplyr.summarise.inform = FALSE)
+source("model.R")
+```
+
+### ARIs and disease prevalences
+
+#### Dodd data (smear positive disease)     
+```{r plot dodd data}
+dat <- read.csv("Dodd data.csv")
+
+ggplot(data=dat)  + geom_point(aes(x=tbprev, y=ari))  + xlab("Smear positive disease/100,000") + ylab("Annual Rate of Infection (%)") + theme_bw() + theme(text=element_text(size=14, color="black"))
+
+#dat <- dat %>% filter(ari<5)
+```      
+ 
+##### Fit linear regression model to ARIs and prevalences. Force y-int to be 0.        
+```{r fit line to smear pos disease prevalence}
+#run linear reg 
+m1 = lm(tbprev~ari -1, data = dat)
+
+#model summary
+summary(m1)
+
+# create dataframe with actual and predicted values 
+plot_data <- data.frame(Predicted_value = predict(m1),   
+                       Observed_value = dat$tbprev, ari=dat$ari )
+m1$coefficients
+#get predicted ari
+pred <- data.frame(predari=round(((c(seq(0,1000,100)))/m1$coefficients[1]),digits=2), prev=c(seq(0,1000,100)))
+
+#plot predicted line over Dodd data
+ggplot(data=dat)  + geom_point(aes(x=tbprev, y=ari), size=1.5)  +   geom_line(data=pred,aes(x=prev, y=predari), color="blue", size=1)+ xlab("Smear positive disease per 100,000 population") + ylab("Annual rate of infection (%)") + theme_bw() + theme(text=element_text(size=14, color="black")) + scale_x_continuous(breaks =c(seq(0,1000,100))) + scale_y_continuous(breaks =c(seq(0,6,1)))
+
+#table form
+pred %>% flextable()
+pred_smearpos = pred
+```
+
+##### Self-cure and TB death as a function of treatment
+```{r}
+x=data.frame(rem=seq(0,.9,.1))
+x$trt = ((10*x$rem)-1)/9
+x$sc = (1-x$trt)/2/5/2
+x$tbdth = (1-x$trt)/2/5/2
+x$total = x$trt +x$sc +x$tbdth
+
+ggplot(data=x) + geom_line(aes(x=rem, y=trt+ sc+tbdth, color="Total")) + geom_line(aes(x=rem, y=trt, color="Treatment")) + geom_line(aes(x=rem, y=sc+tbdth, color="Self-cure or TB death")) + scale_color_discrete(name="") + xlab("Proportion of disease to remove") + ylab("Proportion") + theme_bw()
+```
+
+
+#### Initiate model (Trt = 0)
+```{r model attempt #5, eval=T}
+
+parms = read_xlsx("parm_sweep_TBARI.xlsx")
+parms=parms[1:5, 2:6]/100
+
+
+aris=pred_smearpos$predari[-1]
+
+runs <- vector(mode = "list", length = 120)
+
+inc=0
+
+test = data.frame(protect=c(rep(0,20), rep(.5, 20), rep(.8, 20)), disease.progression = rep(c(parms$dis.prog3, parms$dis.prog4, parms$dis.prog5, parms$dis.prog6),3))
+
+for(j in seq(1,60,5)){
+for(i in 1:length(aris)){
+
+case = test[j:(j+4),]
+inc=inc+1
+
+#Probability of progression to disease, depends on infection duration
+dis.prob <- c(case$disease.progression,0.00075)
+
+#protection from disease progression for reinfections in first year
+protect <- case$protect[1]
+
+#population size (constant)
+pop <- 1000000
+
+#mortality (constant)
+mortality = 0.005
+
+#steps to run model (each 1 yr)
+start=1
+steps = 20
+
+#ari
+ari = aris[i]/100
+
+#trt cure
+tx.cure.rate = 0
+
+#run model and save each run in list
+res <- TBmodel(dis.prob, pop, mortality, start,protect=protect, steps, ari, tx.cure.rate, stable=F , start.trt=7)
+
+res$protect=protect
+res$tot.tb.prog = sum(dis.prob[1:5])
+print(protect)
+print(sum(dis.prob[1:5]))
+runs[[inc]] <- res
+
+}
+
+}
+
+#plots
+
+df <- do.call("rbind", runs) %>% na.omit()
+
+targets = pred
+targets$predari<- targets$predari/100
+colnames(targets) <-c("ari_target", "prev_target")
+
+df2 <- dplyr::left_join(df, targets, by=c("ari_par"= "ari_target"))
+
+df2$diff <- abs((df2$tb.dis/10) - df2$prev_target)
+
+min_prev <- df2  %>% group_by(prev_target, protect, tot.dis.prog) %>% slice(which.min(diff))
+min_prev=min_prev[-1,] %>% filter(prev_target>0)
+
+min_prev %>% group_by(protect, tot.dis.prog) %>% summarise(m=mean(time))
+
+ggplot(data=min_prev) + geom_point(aes(x=ari, y=time)) + facet_grid(protect~tot.dis.prog) + ylim(0,14)
+
+
+ggplot(data=min_prev) + geom_point(aes(x=ari, y=tb.dis)) + facet_grid(protect~tot.dis.prog) 
+
+table(min_prev$time, min_prev$tot.dis.prog, min_prev$protect)
+
+time = min_prev %>% select(protect, tot.dis.prog, time, ari_par)
+
+saveRDS(time, "time.rds")
+```
+
+##### Compare prevalence chosen from burn in to target prevalence.    
+We can't exactly reach our target prevalences given our ARIs as input because time is discrete in 1 year steps so I selected the closest prevalence for now. The plot below compares the closest prevalence to what we were actually targeting. 
+```{r}
+ggplot(data=min_prev) + geom_line(aes(x=ari_par, y=prev_target,  color="Target")) + geom_line(aes(x=ari_par, y=tb.dis/10, color="Closest prevalence")) + ylab("Disease/100 000") + geom_point(data=dat, aes(x=ari/100, y=tbprev))
+
+min_prev %>% select(ari_par, prev_target, tb.dis) %>% mutate(ari_par=ari_par*100, tb.dis=tb.dis/10)
+```
+
+
+### Main Analysis
+
+#### Stabilize target prevalences with treatment
+```{r}
+all_res=readRDS("TB_model_2025-09-04.rds")
+max=49
+all=all_res %>% dplyr::filter(tot.dis.prog==.05 & protect ==0 & ari_par !=0)
+```
+
+
+
+##### Plots to show stabilization.    
+```{r}
+
+ggplot(data=all) + geom_line(aes(x=time, y=tx.cure.rate, color=factor(ari_par))) + ylab("Treatment") + scale_color_discrete(name="ARI") + ggtitle("Treatment rate over time") + theme_bw() +  theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) 
+
+ggplot(data=all) + geom_line(aes(x=time, y=tb.dis/10, color=factor(ari_par))) + ylab("Disease prevalence per 100 000") + scale_color_discrete(name="ARI") + ggtitle("Disease prevaelence over time") + theme_bw() +  theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) 
+
+ggplot(data=all) + geom_line(aes(x=time, y=tot.prim.inf + tot.reinf.inf, color=factor(ari_par))) + ylab("# Infected") + scale_color_discrete(name="ARI") + ggtitle("Infection prevalence") + theme_bw() +  theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) 
+```
+
+
+
+##### Plot treatment needed for each ARI/prev (final state from above)
+```{r}
+t <- all %>% filter(time==max)
+ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=tx.cure.rate), size=1) + xlab("Disease / 100 000") + theme_bw() + ylab("Treatment proportion") + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + ylim(0,.6)
+
+
+ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=cure.trt), size=1) + xlab("Disease / 100 000") + theme_bw() + ylab("Treatment count") + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + ylim(0,2500)
+```
+
+     
+     
+##### Plot infection curves.    
+      
+```{r}
+
+ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=old.prim.inf + old.reinf.inf, color=">5 yr")) + geom_line(aes(x=tb.dis/10, y=inf.prim.1yr + inf.reinf.1yr+inf.prim.2yr + inf.reinf.2yr+inf.prim.3yr + inf.reinf.3yr+inf.prim.4yr + inf.reinf.4yr, color="2-5 yr")) + geom_line(aes(x=tb.dis/10, y=new.prim.inf + new.reinf.inf, color="1 yr"))+ scale_color_discrete("Age of most recent infection") + ylab("# of infections") + theme(legend.position = "top")  + scale_color_discrete("Age of most recent infection") + ylab("# of infections") 
+
+
+ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=old.prim.inf + old.reinf.inf, color=">5 yr"), size=1) + geom_line(aes(x=tb.dis/10, y=inf.prim.1yr + inf.reinf.1yr+inf.prim.2yr + inf.reinf.2yr+inf.prim.3yr + inf.reinf.3yr+inf.prim.4yr + inf.reinf.4yr, color="2-5 yr"), size=1) + geom_line(aes(x=tb.dis/10, y=new.prim.inf + new.reinf.inf, color="1 yr"), size=1) + geom_line(aes(x=tb.dis/10, y=old.prim.inf, color=">5 yr"), linetype = 3, size=1) + geom_line(aes(x=tb.dis/10, y=inf.prim.1yr +inf.prim.2yr+inf.prim.3yr +inf.prim.4yr , color="2-5 yr"), linetype = 3, size=1) + geom_line(aes(x=tb.dis/10, y=new.prim.inf , color="1 yr"), linetype = 3, size=1) + geom_line(aes(x=tb.dis/10, y=old.reinf.inf, color=">5 yr", size=1), linetype = 6, size=1) + geom_line(aes(x=tb.dis/10, y=inf.reinf.1yr +inf.reinf.2yr+inf.reinf.3yr +inf.reinf.4yr , color="2-5 yr"), linetype = 6, size=1) + geom_line(aes(x=tb.dis/10, y=new.reinf.inf , color="1 yr"), linetype = 6, size=1) + scale_color_discrete("Age of most recent infection") + ylab("# of infections") + theme(legend.position = "top")  + scale_color_discrete("Age of most recent infection") + ylab("# of infections") 
+
+ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=old.prim.inf + old.reinf.inf, color=">5 yr"), size=1) + geom_line(aes(x=tb.dis/10, y=old.prim.inf, color=">5 yr"), linetype = 3, size=1)  + geom_line(aes(x=tb.dis/10, y=old.reinf.inf, color=">5 yr", size=1), linetype = 6, size=1)  + scale_color_discrete("Age of most recent infection") + ylab("# of infections") + theme(legend.position = "top") 
+
+
+ggplot(data=t)  + geom_line(aes(x=tb.dis/10, y=inf.prim.1yr + inf.reinf.1yr+inf.prim.2yr + inf.reinf.2yr+inf.prim.3yr + inf.reinf.3yr+inf.prim.4yr + inf.reinf.4yr, color="2-5 yr"), size=1)  + geom_line(aes(x=tb.dis/10, y=inf.prim.1yr +inf.prim.2yr+inf.prim.3yr +inf.prim.4yr , color="2-5 yr"), linetype = 3, size=1) + geom_line(aes(x=tb.dis/10, y=inf.reinf.1yr +inf.reinf.2yr+inf.reinf.3yr +inf.reinf.4yr , color="2-5 yr"), linetype = 6, size=1)  + scale_color_discrete("Age of most recent infection") + ylab("# of infections") + theme(legend.position = "top")
+
+
+ggplot(data=t)  + geom_line(aes(x=tb.dis/10, y=new.prim.inf + new.reinf.inf, color="1 yr"), size=1)   + geom_line(aes(x=tb.dis/10, y=new.prim.inf , color="1 yr"), linetype = 3, size=1)  + geom_line(aes(x=tb.dis/10, y=new.reinf.inf , color="1 yr"), linetype = 6, size=1) + scale_color_discrete("Age of most recent infection") + ylab("# of infections") + theme(legend.position = "top")
+```
+
+
+
+##### Plot treatment, self-cure, TB death proportions
+```{r}
+t <- all %>% filter(time==max)
+ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=tx.cure.rate, color="Treatment"), size=1)+ geom_line(aes(x=tb.dis/10, y=self.cure.rate*2, color="Self-cure/TB death"), size=1)+   geom_line(aes(x=tb.dis/10, y=tx.cure.rate+tb.dth.rate+self.cure.rate, color="Total"), size=1)+ xlab("Disease / 100 000") + theme_bw() + ylab("Proportion") + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + ylim(0,.65) + scale_color_manual(name="",breaks = c("Total","Treatment", "Self-cure/TB death") , values=c("black", "blue", "red"))
+```
+
+
+
+##### Disease duration 
+```{r}
+ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=tb.dis/progress2tb), size=1) + ylab("Disease duration (years)") + xlab("Disease/100 000") + theme_bw()  + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + ylim(0,3.3)
+```
+               
+##### Infections generated per smear positive case       
+```{r}
+ggplot(data=t) + geom_line(aes(y=(new.prim.inf + new.reinf.inf)/tb.dis, x=tb.dis/10, color="Total"), size=1) + ylab("Infections generated per smear positive case per year") + xlab("Disease/100 000") + theme_bw() + geom_line(aes(y=(new.prim.inf/tb.dis), x=tb.dis/10, color="Primary infection"), size=1) + geom_line(aes(y=(new.reinf.inf/tb.dis), x=tb.dis/10, color="Reinfection"), size=1)  + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + scale_color_manual(name="",breaks = c("Total","Primary infection", "Reinfection") , values=c("black", "blue", "red"))+ ylim(0,6)
+
+ggplot(data=t) + geom_line(aes(y=((new.prim.inf + new.reinf.inf)/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Total"), size=1) + ylab("Infections generated per smear positive case") + xlab("Disease/100 000") + theme_bw() + geom_line(aes(y=(new.prim.inf/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Primary infection"), size=1) + geom_line(aes(y=(new.reinf.inf/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Reinfection"), size=1) + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + scale_color_manual(name="",breaks = c("Total","Primary infection", "Reinfection") , values=c("black", "blue", "red"))+ ylim(0,20)
+```
+
+
+##### Disease per infectious case 
+```{r}
+ggplot(data=t) + geom_line(aes(y=(progress2tb/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Total"), size=1) + ylab("Disease cases generated  per smear positive case") + xlab("Disease/100 000") + theme_bw() + ylim(0,1.05) +  geom_line(aes(y=(progress2tbreinf/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Progress from reinfection"), size=1) +  geom_line(aes(y=(progress2tbprim/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Progress from primary infection"), size=1) + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + scale_color_manual(name="",breaks = c("Total","Progress from primary infection", "Progress from reinfection") , values=c("black", "blue", "red"))
+```
+
+
+### Sensitivity Analysis 
+Vary protection for reinfection (0%, 50%, 80%) and disease progression in first 5 years (3-6%)
+```{r parms}
+parms = read_xlsx("parm_sweep_TBARI.xlsx")
+
+flextable(parms) %>% highlight( i = 1:5, j = "dis.prog5", color = "lightgreen")
+```
+
+
+##### Plots to show stabilization.    
+```{r}
+all=all_res %>% filter(ari_par!=0)
+ggplot(data=all) + geom_line(aes(x=time, y=tx.cure.rate, color=factor(ari_par))) + ylab("Treatment") + scale_color_discrete(name="ARI") + ggtitle("Treatment rate over time") + facet_grid(protect~tot.dis.prog) + theme_bw() +  theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) 
+
+ggplot(data=all) + geom_line(aes(x=time, y=tb.dis/10, color=factor(ari_par))) + ylab("Disease prevalence per 100 000") + scale_color_discrete(name="ARI") + ggtitle("Disease prevaelence over time") + facet_grid(protect~tot.dis.prog)+ theme_bw() +  theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) 
+
+ggplot(data=all) + geom_line(aes(x=time, y=tot.prim.inf + tot.reinf.inf, color=factor(ari_par))) + ylab("# Infected") + scale_color_discrete(name="ARI") + ggtitle("Infection prevalence")+ facet_grid(protect~tot.dis.prog) + theme_bw() +  theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) 
+```
+
+
+##### Plot treatment needed for each ARI/prev (final state from above)
+```{r}
+t <- all %>% filter(time==max)
+ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=tx.cure.rate, color=factor(protect)), size=1)+ facet_grid(~tot.dis.prog) + xlab("Disease / 100 000") + theme_bw() + ylab("Treatment proportion") + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + ylim(0,.6) + scale_color_discrete(name="Protection from progression for reinfections")
+
+
+ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=cure.trt, color=factor(protect)), size=1) + facet_grid(~tot.dis.prog) + xlab("Disease / 100 000") + theme_bw() + ylab("Treatment count") + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + ylim(0,2500) + scale_color_discrete(name="Protection from progression for reinfections")
+
+
+
+```
+
+     
+##### Plot treatment, self-cure, TB death proportions
+```{r}
+t <- all %>% filter(time==max)
+ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=tx.cure.rate, color="Treatment"), size=1)+ geom_line(aes(x=tb.dis/10, y=self.cure.rate*2, color="Self-cure/TB death"), size=1)+   geom_line(aes(x=tb.dis/10, y=tx.cure.rate+tb.dth.rate+self.cure.rate, color="Total"), size=1)+ xlab("Disease / 100 000") + theme_bw() + ylab("Proportion") + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + scale_color_manual(name="",breaks = c("Total","Treatment", "Self-cure/TB death") , values=c("black", "blue", "red")) + facet_grid(protect ~ tot.dis.prog)
+```
+
+
+
+##### Disease duration 
+```{r}
+ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=tb.dis/progress2tb, color=factor(protect)), size=1) + ylab("Disease duration (years)") + xlab("Disease/100 000") + theme_bw()  + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + facet_grid(~tot.dis.prog) + scale_color_discrete(name="Protection from progression for reinfections")
+```
+               
+##### Infections generated per smear positive case       
+```{r}
+ggplot(data=t) + geom_line(aes(y=(new.prim.inf + new.reinf.inf)/tb.dis, x=tb.dis/10, color="Total"), size=1) + ylab("Infections generated per smear positive case per year") + xlab("Disease/100 000") + theme_bw() + geom_line(aes(y=(new.prim.inf/tb.dis), x=tb.dis/10, color="Primary infection"), size=1) + geom_line(aes(y=(new.reinf.inf/tb.dis), x=tb.dis/10, color="Reinfection"), size=1)  + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + scale_color_manual(name="",breaks = c("Total","Primary infection", "Reinfection") , values=c("black", "blue", "red")) + facet_grid(protect ~ tot.dis.prog)
+
+ggplot(data=t) + geom_line(aes(y=((new.prim.inf + new.reinf.inf)/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Total"), size=1) + ylab("Infections generated per smear positive case") + xlab("Disease/100 000") + theme_bw() + geom_line(aes(y=(new.prim.inf/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Primary infection"), size=1) + geom_line(aes(y=(new.reinf.inf/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Reinfection"), size=1) + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + scale_color_manual(name="",breaks = c("Total","Primary infection", "Reinfection") , values=c("black", "blue", "red")) + facet_grid(protect ~ tot.dis.prog)
+```
+
+
+##### Disease per infectious case 
+```{r}
+ggplot(data=t) + geom_line(aes(y=(progress2tb/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Total"), size=1) + ylab("Disease cases generated  per smear positive case") + xlab("Disease/100 000") + theme_bw()  +  geom_line(aes(y=(progress2tbreinf/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Progress from reinfection"), size=1) +  geom_line(aes(y=(progress2tbprim/tb.dis)*(tb.dis/progress2tb), x=tb.dis/10, color="Progress from primary infection"), size=1) + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + scale_color_manual(name="",breaks = c("Total","Progress from primary infection", "Progress from reinfection") , values=c("black", "blue", "red"))+ facet_grid(protect ~ tot.dis.prog)
+```
