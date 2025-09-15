@@ -1,11 +1,11 @@
 ---
 title: 'Role of reinfection in sustaining TB transmission'
 output:
-  word_document:
-    toc: true
   html_document:
     toc: true
     df_print: paged
+  word_document:
+    toc: true
 ---
 
 
@@ -18,7 +18,7 @@ library(ggpubr)
 library(flextable)
 library(readxl)
 
-setwd("/projectnb/cbs/samalate/TBinfection")
+setwd("/projectnb/cbs/samalate/TBReModel")
 options(dplyr.summarise.inform = FALSE)
 source("model.R")
 ```
@@ -137,37 +137,29 @@ df2 <- dplyr::left_join(df, targets, by=c("ari_par"= "ari_target"))
 
 df2$diff <- abs((df2$tb.dis/10) - df2$prev_target)
 
-min_prev <- df2  %>% group_by(prev_target, protect, tot.dis.prog) %>% slice(which.min(diff))
+min_prev <- df2  %>% filter(diff>0) %>% group_by(prev_target, protect, tot.dis.prog) %>% slice(which.min(diff))
 min_prev=min_prev[-1,] %>% filter(prev_target>0)
 
-min_prev %>% group_by(protect, tot.dis.prog) %>% summarise(m=mean(time))
+min_prev %>% group_by(protect, tot.dis.prog, tb.dis) %>% summarise(m=mean(time))
 
-ggplot(data=min_prev) + geom_point(aes(x=ari, y=time)) + facet_grid(protect~tot.dis.prog) + ylim(0,14)
+ggplot(data=min_prev) + geom_point(aes(x=ari, y=time)) + facet_grid(protect~tot.dis.prog) 
 
 
-ggplot(data=min_prev) + geom_point(aes(x=ari, y=tb.dis)) + facet_grid(protect~tot.dis.prog) 
+ggplot(data=min_prev) + geom_point(aes(x=ari, y=tb.dis)) + facet_grid(protect~tot.dis.prog) + geom_hline(aes(yintercept =10000)) + geom_line(aes(x=ari_par, y=prev_target*10,  color="Target"))
 
-table(min_prev$time, min_prev$tot.dis.prog, min_prev$protect)
 
-time = min_prev %>% select(protect, tot.dis.prog, time, ari_par)
+time = min_prev %>% select(protect, tot.dis.prog, time, ari_par, tb.dis)
 
 saveRDS(time, "time.rds")
 ```
 
-##### Compare prevalence chosen from burn in to target prevalence.    
-We can't exactly reach our target prevalences given our ARIs as input because time is discrete in 1 year steps so I selected the closest prevalence for now. The plot below compares the closest prevalence to what we were actually targeting. 
-```{r}
-ggplot(data=min_prev) + geom_line(aes(x=ari_par, y=prev_target,  color="Target")) + geom_line(aes(x=ari_par, y=tb.dis/10, color="Closest prevalence")) + ylab("Disease/100 000") + geom_point(data=dat, aes(x=ari/100, y=tbprev))
-
-min_prev %>% select(ari_par, prev_target, tb.dis) %>% mutate(ari_par=ari_par*100, tb.dis=tb.dis/10)
-```
 
 
 ### Main Analysis
 
 #### Stabilize target prevalences with treatment
 ```{r}
-all_res=readRDS("TB_model_2025-09-04.rds")
+all_res=readRDS("TB_model_2025-09-15.rds")
 max=49
 all=all_res %>% dplyr::filter(tot.dis.prog==.05 & protect ==0 & ari_par !=0)
 ```
@@ -250,28 +242,32 @@ Vary protection for reinfection (0%, 50%, 80%) and disease progression in first 
 parms = read_xlsx("parm_sweep_TBARI.xlsx")
 
 flextable(parms) %>% highlight( i = 1:5, j = "dis.prog5", color = "lightgreen")
+
 ```
 
 
 ##### Plots to show stabilization.    
 ```{r}
-all=all_res %>% filter(ari_par!=0)
+all=all_res %>% filter(ari_par!=0) 
 ggplot(data=all) + geom_line(aes(x=time, y=tx.cure.rate, color=factor(ari_par))) + ylab("Treatment") + scale_color_discrete(name="ARI") + ggtitle("Treatment rate over time") + facet_grid(protect~tot.dis.prog) + theme_bw() +  theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) 
 
 ggplot(data=all) + geom_line(aes(x=time, y=tb.dis/10, color=factor(ari_par))) + ylab("Disease prevalence per 100 000") + scale_color_discrete(name="ARI") + ggtitle("Disease prevaelence over time") + facet_grid(protect~tot.dis.prog)+ theme_bw() +  theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) 
 
 ggplot(data=all) + geom_line(aes(x=time, y=tot.prim.inf + tot.reinf.inf, color=factor(ari_par))) + ylab("# Infected") + scale_color_discrete(name="ARI") + ggtitle("Infection prevalence")+ facet_grid(protect~tot.dis.prog) + theme_bw() +  theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) 
+
+
 ```
 
 
 ##### Plot treatment needed for each ARI/prev (final state from above)
 ```{r}
-t <- all %>% filter(time==max)
+t <- all %>% filter(time==max-1)
 ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=tx.cure.rate, color=factor(protect)), size=1)+ facet_grid(~tot.dis.prog) + xlab("Disease / 100 000") + theme_bw() + ylab("Treatment proportion") + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + ylim(0,.6) + scale_color_discrete(name="Protection from progression for reinfections")
 
 
 ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=cure.trt, color=factor(protect)), size=1) + facet_grid(~tot.dis.prog) + xlab("Disease / 100 000") + theme_bw() + ylab("Treatment count") + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + ylim(0,2500) + scale_color_discrete(name="Protection from progression for reinfections")
 
+ggplot(data=t) + geom_point(aes(x=ari, y=tb.dis)) + facet_grid(protect~tot.dis.prog) + geom_hline(aes(yintercept = 10000))
 
 
 ```
@@ -279,7 +275,7 @@ ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=cure.trt, color=factor(protect)), 
      
 ##### Plot treatment, self-cure, TB death proportions
 ```{r}
-t <- all %>% filter(time==max)
+t <- all %>% filter(time==max-1)
 ggplot(data=t) + geom_line(aes(x=tb.dis/10, y=tx.cure.rate, color="Treatment"), size=1)+ geom_line(aes(x=tb.dis/10, y=self.cure.rate*2, color="Self-cure/TB death"), size=1)+   geom_line(aes(x=tb.dis/10, y=tx.cure.rate+tb.dth.rate+self.cure.rate, color="Total"), size=1)+ xlab("Disease / 100 000") + theme_bw() + ylab("Proportion") + theme(legend.position = "top", axis.text = element_text(color="black"), legend.text = element_text(size=10)) + scale_color_manual(name="",breaks = c("Total","Treatment", "Self-cure/TB death") , values=c("black", "blue", "red")) + facet_grid(protect ~ tot.dis.prog)
 ```
 
